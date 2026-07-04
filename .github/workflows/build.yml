@@ -6,20 +6,25 @@ on:
       kver:
         description: "VM uname -r"
         required: true
+        default: "7.0.14"
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    container:
-      image: dongruixuan/trustedhash-devenv:latest
-      options: --privileged
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build signed kernel module
-        working-directory: trustedhash_exploit_v2
-        run: bash ./build_signed_ko.sh "${{ inputs.kver }}"
+      - name: Pull dev image
+        run: docker pull dongruixuan/trustedhash-devenv:latest
+
+      - name: Build signed kernel module inside Docker
+        run: |
+          docker run --rm \
+            -v "$PWD:/work" \
+            -w /work/trustedhash_exploit_v2 \
+            dongruixuan/trustedhash-devenv:latest \
+            bash -lc 'bash ./build_signed_ko.sh "${{ inputs.kver }}"; ls -la'
 
       - name: Upload th_leak.ko
         uses: actions/upload-artifact@v4
