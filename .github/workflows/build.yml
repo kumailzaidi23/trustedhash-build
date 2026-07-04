@@ -15,93 +15,91 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build signed module
+      - name: Build and sign th_leak.ko
         run: |
           set -euxo pipefail
 
-          cat > trustedhash_exploit_v2/ci_build.sh <<'BASH'
+          cat > trustedhash_exploit_v2/ci_build_inside.sh <<'BASH'
           #!/usr/bin/env bash
           set -euxo pipefail
-          : "${KVER:=7.0.14}"
 
           cd /work/trustedhash_exploit_v2
 
-          cat > /tmp/th_leak_build.nix <<'NIX'
-          let
-            flake = builtins.getFlake "path:/tmp/trusted-hash/challenge";
-            pkgs = import flake.inputs.nixpkgs { system = "x86_64-linux"; };
-            linuxPkg = pkgs.linuxPackages_7_0;
-            kernel = linuxPkg.kernel;
-          in
-          kernel.stdenv.mkDerivation {
-            pname = "th_leak";
-            version = "1.0";
-            src = /work/trustedhash_exploit_v2;
+          KEY="/opt/trusted-hash-dev-keys/module-signing/module-signing.key"
+          CERT="/opt/trusted-hash-dev-keys/module-signing/module-signing.pem"
 
-            nativeBuildInputs = kernel.moduleBuildDependencies;
+          test -f "$KEY"
+          test -f "$CERT"
 
-            makeFlags = linuxPkg.kernelModuleMakeFlags ++ [
-              "KDIR=${kernel.dev}/lib/modules/${kernel.modDirVersion}/build"
-            ];
+          echo "[*] candidate kernel build dirs:"
+          find /nix/store -path "*/lib/modules/${KVER}/build" -type d -print | sort
 
-            installPhase = ''
-              mkdir -p $out
-              cp th_leak.ko $out/th_leak.ko
-            '';
-          }
-          NIX
+          KDIR="$(
+            find /nix/store -path "*/lib/modules/${KVER}/build" -type d -print \
+              | sort \
+              | while read -r d; do
+                  if [ -x "$d/scripts/sign-file" ]; then
+                    echo "$d"
+                    break
+                  fi
+                done
+          )"
 
-          cat > /tmp/sign_file_path.nix <<'NIX'
-          let
-            flake = builtins.getFlake "path:/tmp/trusted-hash/challenge";
-            pkgs = import flake.inputs.nixpkgs { system = "x86_64-linux"; };
-            linuxPkg = pkgs.linuxPackages_7_0;
-            kernel = linuxPkg.kernel;
-          in
-          "${kernel.dev}/lib/modules/${kernel.modDirVersion}/build/scripts/sign-file"
-          NIX
+          if [ -z "$KDIR" ]; then
+            KDIR="$(find /nix/store -path "*/lib/modules/${KVER}/build" -type d -print | sort | head -n1)"
+          fi
 
-          cat > /tmp/modver.nix <<'NIX'
-          let
-            flake = builtins.getFlake "path:/tmp/trusted-hash/challenge";
-            pkgs = import flake.inputs.nixpkgs { system = "x86_64-linux"; };
-            linuxPkg = pkgs.linuxPackages_7_0;
-            kernel = linuxPkg.kernel;
-          in
-          kernel.modDirVersion
-          NIX
+          test -n "$KDIR"
+          test -d "$KDIR"
 
-          MODVER="$(nix --extra-experimental-features "nix-command flakes" eval --raw --impure --expr "$(cat /tmp/modver.nix)")"
-          echo "kernel modDirVersion from dev image: $MODVER"
-          test "$MODVER" = "$KVER"
+          echo "[+] using KDIR=$KDIR"
+          ls -la "$KDIR/scripts/sign-file" || true
 
-          nix --extra-experimental-features "nix-command flakes" \
-            build --impure --expr "$(cat /tmp/th_leak_build.nix)" \
-            --out-link /tmp/th_leak_out
+          rm -f th_leak.o th_leak.ko th_leak.mod th_leak.mod.c Module.symvers modules.order .*.cmd
 
-          cp -L /tmp/th_leak_out/th_leak.ko /work/trustedhash_exploit_v2/th_leak.ko
+          make -C "$KDIR" M="$PWD" modules
 
-          SIGN_FILE="$(nix --extra-experimental-features "nix-command flakes" eval --raw --impure --expr "$(cat /tmp/sign_file_path.nix)")"
-          test -x "$SIGN_FILE"
-          test -f /opt/trusted-hash-dev-keys/module-signing/module-signing.key
-          test -f /opt/trusted-hash-dev-keys/module-signing/module-signing.pem
+          SIGN_FILE="$KDIR/scripts/sign-file"
 
-          "$SIGN_FILE" sha512 \
-            /opt/trusted-hash-dev-keys/module-signing/module-signing.key \
-            /opt/trusted-hash-dev-keys/module-signing/module-signing.pem \
-            /work/trustedhash_exploit_v2/th_leak.ko
+          if [ ! -x "$SIGN_FILE" ]; then
+            test -f "$SIGN_FILE"
+            cp "$SIGN_FILE" /tmp/sign-file
+            chmod +x /tmp/sign-file
+            SIGN_FILE="/tmp/sign-file"
+          fi
 
-          ls -la /work/trustedhash_exploit_v2/th_leak.ko
+          "$SIGN_FILE" sha512 "$KEY" "$CERT" th_leak.ko
+
+          ls -la th_leak.ko
+          modinfo th_leak.ko | sed -n '/^signer:/p;/^sig_key:/p;/^vermagic:/p'
           BASH
 
-          chmod +x trustedhash_exploit_v2/ci_build.sh
+          chmod +x trustedhash_exploit_v2/ci_build_inside.sh
 
           docker pull dongruixuan/trustedhash-devenv:latest
+
           docker run --rm \
             -e KVER="${{ inputs.kver }}" \
             -v "$PWD:/work" \
+            -w /work/trustedhash_exploit_v2 \
             dongruixuan/trustedhash-devenv:latest \
-            bash /work/trustedhash_exploit_v2/ci_build.sh
+            bash -lc '
+              set -euxo pipefail
+              nix --extra-experimental-features "nix-command flakes" shell \
+                nixpkgs#gnumake \
+                nixpkgs#gcc \
+                nixpkgs#binutils \
+                nixpkgs#perl \
+                nixpkgs#bc \
+                nixpkgs#openssl \
+                nixpkgs#kmod \
+                nixpkgs#gnused \
+                nixpkgs#gawk \
+                nixpkgs#gnugrep \
+                nixpkgs#coreutils \
+                nixpkgs#findutils \
+                -c bash /work/trustedhash_exploit_v2/ci_build_inside.sh
+            '
 
           test -f trustedhash_exploit_v2/th_leak.ko
           ls -la trustedhash_exploit_v2/th_leak.ko
