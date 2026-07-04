@@ -1,3 +1,4 @@
+
 name: Build trustedhash leak module
 
 on:
@@ -15,26 +16,55 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build signed kernel module inside Docker
+      - name: Build and sign th_leak.ko
         run: |
           set -euxo pipefail
+
           docker pull dongruixuan/trustedhash-devenv:latest
 
           docker run --rm \
             -v "$PWD:/work" \
-            -w /work/trustedhash_exploit_v2 \
             dongruixuan/trustedhash-devenv:latest \
             bash -lc '
               set -euxo pipefail
-              nix --extra-experimental-features "nix-command flakes" shell \
-                nixpkgs#gnumake \
-                nixpkgs#gcc \
-                nixpkgs#binutils \
-                nixpkgs#perl \
-                nixpkgs#bc \
-                nixpkgs#openssl \
-                nixpkgs#kmod \
-                -c bash -lc "bash ./build_signed_ko.sh '${{ inputs.kver }}'; ls -la; find /work -name '*.ko' -ls"
+
+              cat > /tmp/build-leak.sh <<'"'"'EOS'"'"'
+#!/usr/bin/env bash
+set -euxo pipefail
+
+KVER="${1:-7.0.14}"
+WORKDIR="/work/trustedhash_exploit_v2"
+KEY="/opt/trusted-hash-dev-keys/module-signing/module-signing.key"
+CERT="/opt/trusted-hash-dev-keys/module-signing/module-signing.pem"
+
+cd "$WORKDIR"
+
+KDIR="$(find /nix/store -path "*/lib/modules/${KVER}/build" -type d -print -quit)"
+test -n "$KDIR"
+test -d "$KDIR"
+test -f "$KEY"
+test -f "$CERT"
+test -x "$KDIR/scripts/sign-file"
+
+echo "[+] KDIR=$KDIR"
+echo "[+] KEY=$KEY"
+echo "[+] CERT=$CERT"
+
+rm -f th_leak.o th_leak.ko th_leak.mod th_leak.mod.c Module.symvers modules.order .*.cmd
+
+make -C "$KDIR" M="$PWD" ARCH=x86 modules
+
+"$KDIR/scripts/sign-file" sha512 "$KEY" "$CERT" th_leak.ko
+
+ls -la th_leak.ko
+file th_leak.ko
+EOS
+
+              chmod +x /tmp/build-leak.sh
+
+              nix --extra-experimental-features "nix-command flakes" \
+                develop /tmp/trusted-hash/challenge#kernel \
+                --command /tmp/build-leak.sh "7.0.14"
             '
 
           test -f trustedhash_exploit_v2/th_leak.ko
