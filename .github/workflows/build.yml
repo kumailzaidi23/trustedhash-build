@@ -1,0 +1,28 @@
+name: Build trustedhash leak module
+
+on:
+  workflow_dispatch:
+    inputs:
+      kver:
+        description: "VM uname -r"
+        required: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container:
+      image: dongruixuan/trustedhash-devenv:latest
+      options: --privileged
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build signed kernel module
+        working-directory: trustedhash_exploit_v2
+        run: bash ./build_signed_ko.sh "${{ inputs.kver }}"
+
+      - name: Upload th_leak.ko
+        uses: actions/upload-artifact@v4
+        with:
+          name: th_leak-ko
+          path: trustedhash_exploit_v2/th_leak.ko
