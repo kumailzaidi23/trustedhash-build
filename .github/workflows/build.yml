@@ -15,16 +15,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Pull dev image
-        run: docker pull dongruixuan/trustedhash-devenv:latest
-
       - name: Build signed kernel module inside Docker
         run: |
+          set -euxo pipefail
+          docker pull dongruixuan/trustedhash-devenv:latest
           docker run --rm \
             -v "$PWD:/work" \
             -w /work/trustedhash_exploit_v2 \
             dongruixuan/trustedhash-devenv:latest \
-            bash -lc 'bash ./build_signed_ko.sh "${{ inputs.kver }}"; ls -la'
+            bash -lc 'set -euxo pipefail; pwd; ls -la; bash ./build_signed_ko.sh "${{ inputs.kver }}"; ls -la; find /work -name "*.ko" -ls'
+          test -f trustedhash_exploit_v2/th_leak.ko
+          ls -la trustedhash_exploit_v2/th_leak.ko
 
       - name: Upload th_leak.ko
         uses: actions/upload-artifact@v4
