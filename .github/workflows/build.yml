@@ -1,4 +1,3 @@
-
 name: Build trustedhash leak module
 
 on:
@@ -16,56 +15,93 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build and sign th_leak.ko
+      - name: Build signed module
         run: |
           set -euxo pipefail
 
-          docker pull dongruixuan/trustedhash-devenv:latest
+          cat > trustedhash_exploit_v2/ci_build.sh <<'BASH'
+          #!/usr/bin/env bash
+          set -euxo pipefail
+          : "${KVER:=7.0.14}"
 
+          cd /work/trustedhash_exploit_v2
+
+          cat > /tmp/th_leak_build.nix <<'NIX'
+          let
+            flake = builtins.getFlake "path:/tmp/trusted-hash/challenge";
+            pkgs = import flake.inputs.nixpkgs { system = "x86_64-linux"; };
+            linuxPkg = pkgs.linuxPackages_7_0;
+            kernel = linuxPkg.kernel;
+          in
+          kernel.stdenv.mkDerivation {
+            pname = "th_leak";
+            version = "1.0";
+            src = /work/trustedhash_exploit_v2;
+
+            nativeBuildInputs = kernel.moduleBuildDependencies;
+
+            makeFlags = linuxPkg.kernelModuleMakeFlags ++ [
+              "KDIR=${kernel.dev}/lib/modules/${kernel.modDirVersion}/build"
+            ];
+
+            installPhase = ''
+              mkdir -p $out
+              cp th_leak.ko $out/th_leak.ko
+            '';
+          }
+          NIX
+
+          cat > /tmp/sign_file_path.nix <<'NIX'
+          let
+            flake = builtins.getFlake "path:/tmp/trusted-hash/challenge";
+            pkgs = import flake.inputs.nixpkgs { system = "x86_64-linux"; };
+            linuxPkg = pkgs.linuxPackages_7_0;
+            kernel = linuxPkg.kernel;
+          in
+          "${kernel.dev}/lib/modules/${kernel.modDirVersion}/build/scripts/sign-file"
+          NIX
+
+          cat > /tmp/modver.nix <<'NIX'
+          let
+            flake = builtins.getFlake "path:/tmp/trusted-hash/challenge";
+            pkgs = import flake.inputs.nixpkgs { system = "x86_64-linux"; };
+            linuxPkg = pkgs.linuxPackages_7_0;
+            kernel = linuxPkg.kernel;
+          in
+          kernel.modDirVersion
+          NIX
+
+          MODVER="$(nix --extra-experimental-features "nix-command flakes" eval --raw --impure --expr "$(cat /tmp/modver.nix)")"
+          echo "kernel modDirVersion from dev image: $MODVER"
+          test "$MODVER" = "$KVER"
+
+          nix --extra-experimental-features "nix-command flakes" \
+            build --impure --expr "$(cat /tmp/th_leak_build.nix)" \
+            --out-link /tmp/th_leak_out
+
+          cp -L /tmp/th_leak_out/th_leak.ko /work/trustedhash_exploit_v2/th_leak.ko
+
+          SIGN_FILE="$(nix --extra-experimental-features "nix-command flakes" eval --raw --impure --expr "$(cat /tmp/sign_file_path.nix)")"
+          test -x "$SIGN_FILE"
+          test -f /opt/trusted-hash-dev-keys/module-signing/module-signing.key
+          test -f /opt/trusted-hash-dev-keys/module-signing/module-signing.pem
+
+          "$SIGN_FILE" sha512 \
+            /opt/trusted-hash-dev-keys/module-signing/module-signing.key \
+            /opt/trusted-hash-dev-keys/module-signing/module-signing.pem \
+            /work/trustedhash_exploit_v2/th_leak.ko
+
+          ls -la /work/trustedhash_exploit_v2/th_leak.ko
+          BASH
+
+          chmod +x trustedhash_exploit_v2/ci_build.sh
+
+          docker pull dongruixuan/trustedhash-devenv:latest
           docker run --rm \
+            -e KVER="${{ inputs.kver }}" \
             -v "$PWD:/work" \
             dongruixuan/trustedhash-devenv:latest \
-            bash -lc '
-              set -euxo pipefail
-
-              cat > /tmp/build-leak.sh <<'"'"'EOS'"'"'
-#!/usr/bin/env bash
-set -euxo pipefail
-
-KVER="${1:-7.0.14}"
-WORKDIR="/work/trustedhash_exploit_v2"
-KEY="/opt/trusted-hash-dev-keys/module-signing/module-signing.key"
-CERT="/opt/trusted-hash-dev-keys/module-signing/module-signing.pem"
-
-cd "$WORKDIR"
-
-KDIR="$(find /nix/store -path "*/lib/modules/${KVER}/build" -type d -print -quit)"
-test -n "$KDIR"
-test -d "$KDIR"
-test -f "$KEY"
-test -f "$CERT"
-test -x "$KDIR/scripts/sign-file"
-
-echo "[+] KDIR=$KDIR"
-echo "[+] KEY=$KEY"
-echo "[+] CERT=$CERT"
-
-rm -f th_leak.o th_leak.ko th_leak.mod th_leak.mod.c Module.symvers modules.order .*.cmd
-
-make -C "$KDIR" M="$PWD" ARCH=x86 modules
-
-"$KDIR/scripts/sign-file" sha512 "$KEY" "$CERT" th_leak.ko
-
-ls -la th_leak.ko
-file th_leak.ko
-EOS
-
-              chmod +x /tmp/build-leak.sh
-
-              nix --extra-experimental-features "nix-command flakes" \
-                develop /tmp/trusted-hash/challenge#kernel \
-                --command /tmp/build-leak.sh "7.0.14"
-            '
+            bash /work/trustedhash_exploit_v2/ci_build.sh
 
           test -f trustedhash_exploit_v2/th_leak.ko
           ls -la trustedhash_exploit_v2/th_leak.ko
